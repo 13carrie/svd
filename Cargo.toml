@@ -1,0 +1,8 @@
+[package]
+name = "svd_project"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+halo2 = "0.1.0-beta.2"
+
