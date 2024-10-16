@@ -5,4 +5,4 @@ edition = "2021"
 
 [dependencies]
 halo2 = "0.1.0-beta.2"
-
+nalgebra = "0.29.0"

@@ -1,3 +1,8 @@
+mod svd;
 fn main() {
-    println!("Hello, world!");
+    
+    svd::compute_svd();
+    
+    // then initialise svd proof
+    // run svd proof
 }
