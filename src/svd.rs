@@ -23,3 +23,7 @@ pub fn compute_svd() {
         println!("Failed to compute SVD.");
     }
 }
+
+fn validate_svd() {
+    // validate that svd decomp is correct
+}
