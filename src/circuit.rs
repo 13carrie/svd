@@ -10,14 +10,12 @@ use pairing::bn256::Fr as Fp;
 
 
 
-// chips:
 // zkfixedpointchip for encoding all matrix mult. operations
     // forked from library
-
 // zkmatrix for matrix multiplication and transposition
-    // implemented in halo2-svd
+    // implemented in linear_algebra
 // zkvector for inner product, norm, distance, vector operations
-    // implemented in halo2-svd
+    // implemented in linear_algebra
 
 struct circuit {
     // private inputs: U, sigma, V

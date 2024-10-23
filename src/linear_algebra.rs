@@ -410,3 +410,209 @@ impl<F: BigPrimeField, const PRECISION_BITS: u32> ZkMatrix<F, PRECISION_BITS> {
         return Self { matrix: a_trans, num_rows: a.num_col, num_col: a.num_rows };
     }
 }
+
+/// Constrains that `x` satisfies `|x| < bnd`, i.e., `x` is in the set `{-(bnd-1), -(bnd-2), ..., 0, 1, ..., (bnd-1)}`
+///
+/// Does so by checking that `x+(bnd-1) < 2*bnd - 1` as a range check
+pub fn check_abs_less_than<F: BigPrimeField>(
+    ctx: &mut Context<F>,
+    range: &RangeChip<F>,
+    x: AssignedValue<F>,
+    bnd: &BigUint,
+) {
+    let new_bnd = BigUint::from(2u32) * bnd - BigUint::from(1u32);
+    let translated_x =
+        range.gate.add(ctx, x, Constant(biguint_to_fe(&(bnd - BigUint::from(1u32)))));
+    range.check_big_less_than_safe(ctx, translated_x, new_bnd);
+}
+
+/// Takes as two matrices `a` and `b` as input and checks that `|a[i][j] - b[i][j]| < tol` for each `i,j`
+/// according to the absolute value check in `check_abs_less_than`
+///
+/// Assumes matrix `a` and `b` are well defined matrices (all rows have the same size) and asserts (outside of circuit) that they can be compared
+pub fn check_mat_diff<F: BigPrimeField>(
+    ctx: &mut Context<F>,
+    range: &RangeChip<F>,
+    a: &Vec<Vec<AssignedValue<F>>>,
+    b: &Vec<Vec<AssignedValue<F>>>,
+    tol: &BigUint,
+) {
+    assert_eq!(a.len(), b.len());
+    assert_eq!(a[0].len(), b[0].len());
+
+    for i in 0..a.len() {
+        for j in 0..a[0].len() {
+            let diff = range.gate.sub(ctx, a[i][j], b[i][j]);
+            check_abs_less_than(ctx, &range, diff, tol);
+        }
+    }
+}
+
+/// Given a matrix of field elements `a` and a field element `scalar_id`, checks that `|a[i][j] - scalar_id*Id[i][j]| < tol` for each `i,j`, where Id is the identity matrix
+/// according to the absolute value check in `check_abs_less_than`
+pub fn check_mat_id<F: BigPrimeField>(
+    ctx: &mut Context<F>,
+    range: &RangeChip<F>,
+    a: &Vec<Vec<AssignedValue<F>>>,
+    scalar_id: &AssignedValue<F>,
+    tol: &BigUint,
+) {
+    let mut b: Vec<Vec<AssignedValue<F>>> = Vec::new();
+    let zero = ctx.load_constant(F::zero());
+
+    for i in 0..a.len() {
+        let mut row: Vec<AssignedValue<F>> = Vec::new();
+        for j in 0..a[0].len() {
+            if i == j {
+                row.push(scalar_id.clone())
+            } else {
+                row.push(zero.clone());
+            }
+        }
+        b.push(row);
+    }
+    check_mat_diff(ctx, &range, a, &b, tol);
+}
+
+/// Given a matrix `a` in the fixed point representation, checks that all of its entries are less in absolute value than some bound `bnd`
+///
+/// Assumes matrix `a` is well formed (all rows have the same size)
+///
+/// COMMENT- for our specific use case- to make sure that unitaries are in (-1,1), it might be better to use range_check based checks
+pub fn check_mat_entries_bounded<F: BigPrimeField>(
+    ctx: &mut Context<F>,
+    range: &RangeChip<F>,
+    a: &Vec<Vec<AssignedValue<F>>>,
+    bnd: &BigUint,
+) {
+    for i in 0..a.len() {
+        for j in 0..a[0].len() {
+            check_abs_less_than(ctx, &range, a[i][j], &bnd);
+        }
+    }
+}
+
+/// Takes matrices `a` and `b` (viewed simply as field elements), calculates and outputs matrix product `c = a*b` outside of the zk circuit
+///
+/// Assumes matrix `a` and `b` are well defined matrices (all rows have the same size) and asserts (outside of circuit) that they can be multiplied
+///
+/// Uses trivial O(N^3) matrix multiplication algorithm
+///
+/// Doesn't contrain output in any way
+pub fn field_mat_mul<F: BigPrimeField>(
+    a: &Vec<Vec<AssignedValue<F>>>,
+    b: &Vec<Vec<AssignedValue<F>>>,
+) -> Vec<Vec<F>> {
+    // a.num_col == b.num_rows
+    assert_eq!(a[0].len(), b.len());
+
+    let mut c: Vec<Vec<F>> = Vec::new();
+    #[allow(non_snake_case)]
+    let N = a.len();
+    #[allow(non_snake_case)]
+    let K = a[0].len();
+    #[allow(non_snake_case)]
+    let M = b[0].len();
+
+    for i in 0..N {
+        let mut row: Vec<F> = Vec::new();
+        for j in 0..M {
+            let mut elem = F::zero();
+            for k in 0..K {
+                elem += a[i][k].value().clone() * b[k][j].value().clone();
+            }
+            row.push(elem);
+        }
+        c.push(row);
+    }
+    return c;
+}
+
+/// Takes matrices `a` and `b` (viewed simply as field elements), calculates matrix product `c_s = a*b` outside of the zk circuit, loads `c_s` into the context `ctx` and outputs the loaded matrix
+///
+/// Assumes matrix `a` and `b` are well defined matrices (all rows have the same size) and asserts (outside of circuit) that they can be multiplied
+///
+/// Uses trivial O(N^3) matrix multiplication algorithm
+///
+/// Doesn't contrain output matrix in any way
+pub fn honest_prover_mat_mul<F: BigPrimeField>(
+    ctx: &mut Context<F>,
+    a: &Vec<Vec<AssignedValue<F>>>,
+    b: &Vec<Vec<AssignedValue<F>>>,
+) -> Vec<Vec<AssignedValue<F>>> {
+    // field multiply matrices a and b
+    // for honest prover creates the correct product multiplied by the quantization_scale (S) when a and b are field point quantized
+    let c_s = field_mat_mul(a, b);
+    let mut assigned_c_s: Vec<Vec<AssignedValue<F>>> = Vec::new();
+
+    let num_rows = c_s.len();
+    let num_col = c_s[0].len();
+    for i in 0..num_rows {
+        let mut new_row: Vec<AssignedValue<F>> = Vec::new();
+        for j in 0..num_col {
+            let elem = c_s[i][j];
+            new_row.push(ctx.load_witness(elem));
+        }
+        assigned_c_s.push(new_row);
+    }
+    return assigned_c_s;
+}
+
+/// Multiplies matrix `a` to vector `v` in the zk-circuit and returns the constrained output `a.v`
+/// -- all assuming `a` and `v` are field elements (and not fixed point encoded)
+///
+/// Assumes matrix `a` is well defined (rows are equal size) and asserts (outside circuit) `a` can be multiplied to `v`
+pub fn field_mat_vec_mul<F: BigPrimeField>(
+    ctx: &mut Context<F>,
+    gate: &GateChip<F>,
+    a: &Vec<Vec<AssignedValue<F>>>,
+    v: &Vec<AssignedValue<F>>,
+) -> Vec<AssignedValue<F>> {
+    assert_eq!(a[0].len(), v.len());
+    let mut y: Vec<AssignedValue<F>> = Vec::new();
+    for row in a {
+        let mut w: Vec<QuantumCell<F>> = Vec::new();
+        for x in v {
+            w.push(Existing(*x));
+        }
+        let w = w;
+
+        let mut u: Vec<QuantumCell<F>> = Vec::new();
+        for x in row {
+            u.push(Existing(*x));
+        }
+        let u = u;
+
+        y.push(gate.inner_product(ctx, u, w));
+    }
+
+    return y;
+}
+
+/// Multiplies matrix `a` by a diagonal matrix represented as a vector `v` in the zk-circuit and returns the constrained output `a*Diag(v)`
+/// -- all assuming `a` and `v` are field elements, (and not fixed point encoded)
+///
+/// Assumes matrix `a` is well defined (rows are equal size)
+///
+/// If dimension of `a` is `N X K` and `v` is length `M`, then multiplication is carried out as long as `K >= M`
+///
+/// In case `K > M`, multiplication result is actually the `N X M` matrix given by `a*[Diag(v) 0]^T` where 0 is the `(M X (K-M))` matrix of all zeroes;
+/// this choice allows us to handle one of the cases in the SVD check
+pub fn mat_times_diag_mat<F: BigPrimeField>(
+    ctx: &mut Context<F>,
+    gate: &GateChip<F>,
+    a: &Vec<Vec<AssignedValue<F>>>,
+    v: &Vec<AssignedValue<F>>,
+) -> Vec<Vec<AssignedValue<F>>> {
+    assert!(v.len() <= a[0].len());
+    let mut m: Vec<Vec<AssignedValue<F>>> = Vec::new();
+    for i in 0..a.len() {
+        let mut new_row: Vec<AssignedValue<F>> = Vec::new();
+        for j in 0..v.len() {
+            let prod = gate.mul(ctx, a[i][j], v[j]);
+            new_row.push(prod);
+        }
+        m.push(new_row);
+    }
+    return m;
+}
