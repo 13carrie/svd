@@ -7,6 +7,11 @@ use halo2_proofs::{
     poly::Rotation,
 };
 use pairing::bn256::Fr as Fp;
+use axiom_eth::rlp::{
+    builder::{FnSynthesize, RlcThreadBuilder, RlpCircuitBuilder},
+    rlc::RlcChip,
+    *,
+};
 
 
 
