@@ -1,4 +1,12 @@
-// implement proof verification logic here lol
+// implement proof verification logic here
+mod circuit;
+use circuit::CircuitInput;
+use halo2_base::utils::{BigPrimeField, ScalarField};
+use axiom_eth::rlp::{
+    builder::{FnSynthesize, RlcThreadBuilder, RlpCircuitBuilder},
+    rlc::RlcChip,
+    *,
+};
 
 
 // polynomial commitment
@@ -17,6 +25,10 @@ fn verify_open() {
 // verify proof given proof, verification key and public inputs
 // inputs: generated proof, public inputs, verification key
 // freivald's algo
-fn verify_proof() {
-
+// should be really similar to two_step_svd_verif
+fn verify_proof<F: ScalarField>(
+    mut builder: RlcThreadBuilder<F>,
+    input: CircuitInput,
+) -> RlpCircuitBuilder<F, impl FnSynthesize<F>> {
+    // input a lot more of two_step_svd_verif
 }
