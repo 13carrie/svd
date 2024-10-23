@@ -211,10 +211,202 @@ impl<F: BigPrimeField, const PRECISION_BITS: u32> ZkVector<F, PRECISION_BITS> {
 }
 
 #[derive(Clone)]
-pub struct ZkMatrix {
-    // Fields and methods for ZkMatrix
+pub struct ZkMatrix<F: BigPrimeField, const PRECISION_BITS: u32> {
+    pub matrix: Vec<Vec<AssignedValue<F>>>,
+    pub num_rows: usize,
+    pub num_col: usize,
 }
 
-impl ZkMatrix {
+impl<F: BigPrimeField, const PRECISION_BITS: u32> ZkMatrix<F, PRECISION_BITS> {
     // Implement methods like matrix multiplication, transpose, etc.
+    /// Creates a ZkMatrix from a f64 matrix
+    ///
+    /// Leads to num_rows*num_col new cells
+    ///
+    /// Does not constrain the output in anyway
+    pub fn new(
+        ctx: &mut Context<F>,
+        fpchip: &FixedPointChip<F, PRECISION_BITS>,
+        matrix: &Vec<Vec<f64>>,
+    ) -> Self {
+        let mut zkmatrix: Vec<Vec<AssignedValue<F>>> = Vec::new();
+        let num_rows = matrix.len();
+        let num_col = matrix[0].len();
+        for row in matrix {
+            assert!(row.len() == num_col);
+        }
+        for i in 0..num_rows {
+            let mut new_row: Vec<AssignedValue<F>> = Vec::new();
+            for j in 0..num_col {
+                let elem = matrix[i][j];
+                let elem = fpchip.quantization(elem);
+                new_row.push(ctx.load_witness(elem));
+            }
+            zkmatrix.push(new_row);
+        }
+        return Self { matrix: zkmatrix, num_rows: num_rows, num_col: num_col };
+    }
+
+    /// Dequantizes the matrix and returns it;
+    ///
+    /// Action is not constrained in anyway
+    pub fn dequantize(&self, fpchip: &FixedPointChip<F, PRECISION_BITS>) -> Vec<Vec<f64>> {
+        let mut dq_matrix: Vec<Vec<f64>> = Vec::new();
+        for i in 0..self.num_rows {
+            dq_matrix.push(Vec::<f64>::new());
+            for j in 0..self.num_col {
+                let elem = self.matrix[i][j];
+                dq_matrix[i].push(fpchip.dequantization(*elem.value()));
+            }
+        }
+        return dq_matrix;
+    }
+
+    /// Prints the dequantized version of the matrix and returns it;
+    ///
+    /// Action is not constrained in anyway
+    pub fn print(&self, fpchip: &FixedPointChip<F, PRECISION_BITS>) {
+        print!("[\n");
+        for i in 0..self.num_rows {
+            print!("[\n");
+            for j in 0..self.num_col {
+                let elem = self.matrix[i][j];
+                let elem = fpchip.dequantization(*elem.value());
+                print!("{:?}, ", elem);
+            }
+            print!("], \n");
+        }
+        println!("]");
+    }
+
+    /// Takes quantised matrices `a` and `b`, their unscaled product `c_s`
+    /// and a commitment (hash) to *at least* all of these matrices `init_rand`
+    /// and checks if `a*b = c_s` in field multiplication.
+    ///
+    /// `c_s`: unscaled product of `a` and `b`(produced by simply multiplying `a` and `b` as field elements);
+    ///  producing this is the costly part of matrix multiplication
+    ///
+    /// `init_rand`:  is the starting randomness/ challenge value; should commit to
+    /// *at least* the matrices `a, b, c_s`
+    ///
+    /// Since, this method only verifies field multiplication, it will not fail even if
+    /// `a` and `b` are incorrectly encoded. However, trying to rescale the result and use
+    /// it downstream might fail in this case.
+    pub fn verify_mul(
+        ctx: &mut Context<F>,
+        fpchip: &FixedPointChip<F, PRECISION_BITS>,
+        a: &Self,
+        b: &Self,
+        c_s: &Vec<Vec<AssignedValue<F>>>,
+        init_rand: &AssignedValue<F>,
+    ) {
+        assert_eq!(a.num_col, b.num_rows);
+        assert_eq!(c_s.len(), a.num_rows);
+        assert_eq!(c_s[0].len(), b.num_col);
+        assert!(c_s[0].len() >= 1);
+
+        let d = c_s[0].len();
+        let gate = fpchip.gate();
+
+        // v = (1, r, r^2, ..., r^(d-1)) where r = init_rand is the random challenge value
+        let mut v: Vec<AssignedValue<F>> = Vec::new();
+
+        let one = ctx.load_witness(F::one());
+        gate.assert_is_const(ctx, &one, &F::one());
+        v.push(one);
+
+        for i in 1..d {
+            let prev = &v[i - 1];
+            let r_to_i = fpchip.gate().mul(ctx, *prev, *init_rand);
+            v.push(r_to_i);
+        }
+        let v = v;
+
+        // println!("Random vector, v = [");
+        // for x in &v {
+        //     println!("{:?}", *x.value());
+        // }
+        // println!("]");
+
+        let cs_times_v = field_mat_vec_mul(ctx, gate, c_s, &v);
+        let b_times_v = field_mat_vec_mul(ctx, gate, &b.matrix, &v);
+        let ab_times_v = field_mat_vec_mul(ctx, gate, &a.matrix, &b_times_v);
+
+        for i in 0..cs_times_v.len() {
+            gate.is_equal(ctx, cs_times_v[i], ab_times_v[i]);
+        }
+    }
+
+    /// Takes `c_s` and divides it by the quantization factor to scale it;
+    ///
+    /// Useful after matrix multiplication;
+    ///
+    /// Is costly- leads to ~94 (when lookup_bits =12) cells per element
+    ///
+    /// NOTE: Each of the entries of `c_s` need to be lesser than `2^(3*PRECISION_BITS)`
+    /// for the result to be correctly encoded. For rescaling after matrix multiplication,
+    /// best way to ensure this is to simply make sure that the matrices being multiplied are
+    /// appropriately bounded.
+    pub fn rescale_matrix(
+        ctx: &mut Context<F>,
+        fpchip: &FixedPointChip<F, PRECISION_BITS>,
+        c_s: &Vec<Vec<AssignedValue<F>>>,
+    ) -> Self {
+        // #CONSTRAINTS = 94*N^2
+        // now rescale c_s
+        let mut c: Vec<Vec<AssignedValue<F>>> = Vec::new();
+        let num_rows = c_s.len();
+        let num_col = c_s[0].len();
+        for i in 0..num_rows {
+            let mut new_row: Vec<AssignedValue<F>> = Vec::new();
+            for j in 0..num_col {
+                // use fpchip to rescale c_s[i][j]
+                // implemented in circuit, so we know c produced is correct
+                let (elem, _) = fpchip.signed_div_scale(ctx, c_s[i][j]);
+                new_row.push(elem);
+            }
+            c.push(new_row);
+        }
+        return Self { matrix: c, num_rows: num_rows, num_col: num_col };
+    }
+
+    /// hash all the matrices in the given list
+    pub fn hash_matrix_list(
+        ctx: &mut Context<F>,
+        gate: &GateChip<F>,
+        matrix_list: &Vec<Self>,
+    ) -> AssignedValue<F> {
+        // T, R_F, R_P values correspond to POSEIDON-128 values given in Table 2 of the Poseidon hash paper
+        const T: usize = 3;
+        const RATE: usize = 2;
+        const R_F: usize = 8;
+        const R_P: usize = 57;
+
+        // MODE OF USE: we will update the poseidon chip with all the values and then extract one value
+        let mut poseidon = PoseidonChip::<F, T, RATE>::new(ctx, R_F, R_P).unwrap();
+        for mat in matrix_list {
+            for row in &mat.matrix {
+                poseidon.update(row);
+            }
+        }
+        let init_rand = poseidon.squeeze(ctx, gate).unwrap();
+        // dbg!(init_rand.value());
+        return init_rand;
+    }
+
+    /// Outputs the transpose matrix of a matrix `a`;
+    ///
+    /// Doesn't create any new constraints; just outputs the a copy of the transposed Self.matrix
+    pub fn transpose_matrix(a: &Self) -> Self {
+        let mut a_trans: Vec<Vec<AssignedValue<F>>> = Vec::new();
+
+        for i in 0..a.num_col {
+            let mut new_row: Vec<AssignedValue<F>> = Vec::new();
+            for j in 0..a.num_rows {
+                new_row.push(a.matrix[j][i].clone());
+            }
+            a_trans.push(new_row);
+        }
+        return Self { matrix: a_trans, num_rows: a.num_col, num_col: a.num_rows };
+    }
 }
