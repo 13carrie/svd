@@ -43,7 +43,6 @@ struct CircuitInput {
 
 }
 
-
 impl circuit<u64> for CircuitInput {
     // configure columns and selectors
 
@@ -93,6 +92,7 @@ impl circuit<u64> for CircuitInput {
     // 
     fn synthesize(
         &self,
+        // building the layout of lookup table
         cs: &mut impl Layouter,
     ) -> Result<(), Error> {
         cs.assign_region(
@@ -133,6 +133,7 @@ impl circuit<u64> for CircuitInput {
                     )?;
                 }
 
+                // check the "ok" usage here -- correct?
                 Ok(())},
             )?;
 

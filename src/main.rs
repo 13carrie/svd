@@ -6,10 +6,9 @@ fn main() {
     // first, compute svd
     let (m, u, sigma, v_t) = svd::compute_svd();
 
-    // then, setup any necessary env
-
-    
+    // establish polynomial commitments
     // then initialise svd proof
+
 
     // run svd proof
 }
@@ -17,9 +16,9 @@ fn main() {
 // step 1 of polynomial commitment
 // initialises setup params to be used by prover and verifier
 /*
-fn set_up() -> (i32, i32) {
-    let params = 1;
-    let verifier_params = 1;
+fn set_up() -> (?,?) {
+    let params = ?;
+    let verifier_params = ?;
     (params, verifier_params) 
 }
 
